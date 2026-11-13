@@ -1,0 +1,142 @@
+
+---
+title: "Body-site specificity in the human microbiome"
+author: "2021ICT48"
+date: "2026-11-13"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+---
+
+# 1. Introduction
+
+This analysis investigates body-site specificity in the human microbiome using the Human Microbiome Project (HMP) dataset. We apply Bray-Curtis dissimilarity, PCoA, and hierarchical clustering to test if samples group by body region without labels.
+
+# 2. Data Loading and Preparation
+
+We used the HMPv13 dataset from the MicrobeDS package, which contains 16S rRNA profiles from the Human Microbiome Project. This dataset includes samples from multiple body sites across healthy adult volunteers. Analysis was carried out in R using the phyloseq and tidyverse packages.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+suppressPackageStartupMessages({
+  library(MicrobeDS)
+  library(phyloseq)
+  library(tidyverse)
+})
+
+data(HMPv13)
+ps <- HMPv13
+```
+
+# 3. Body Site Classification 
+
+Body sites were grouped into five broad regions: Skin, Vaginal, Gut, Nasal, and Oral. The detailed UBERON ontology terms were mapped to these categories by pattern matching on the site names (e.g. any term containing "skin" was classified as Skin).
+
+```{r body-classification, echo=FALSE}
+meta <- as.data.frame(sample_data(ps))
+
+meta$body_site_clean <- gsub("^UBERON:", "", meta$body_site)
+meta$body_site_clean <- gsub("_", " ", meta$body_site_clean)
+
+meta$body_region <- case_when(
+  grepl("skin", meta$body_site_clean) ~ "Skin",
+  grepl("vagina|introitus|fornix", meta$body_site_clean) ~ "Vaginal",
+  grepl("feces", meta$body_site_clean) ~ "Gut",
+  grepl("nares", meta$body_site_clean) ~ "Nasal",
+  TRUE ~ "Oral"
+)
+
+class(meta) <- "data.frame"
+sample_data(ps) <- sample_data(data.frame(meta, row.names = rownames(meta)))
+```
+
+# 4. Data Filtering and Normalization
+
+To reduce noise from rare taxa, OTUs with fewer than 10 total reads across all samples were removed. Counts were then converted to relative abundances (proportions) so that samples with different sequencing depths could be compared on a common scale.
+
+```{r normalization, echo=FALSE}
+keep <- taxa_sums(otu_table(ps)) > 10
+ps_f <- prune_taxa(keep, ps)
+ps_rel <- transform_sample_counts(ps_f, function(x) x / sum(x))
+```
+
+# 5. PCoA Visualization
+
+Bray–Curtis dissimilarity was calculated between all samples to quantify differences in community composition. Principal Coordinates Analysis (PCoA) was then used to reduce this distance matrix to two dimensions for visualisation. Note that body-region labels are not used to compute the ordination — they are only added as colours afterwards, so any visible grouping reflects genuine biological structure.
+
+```{r pcoa, echo=FALSE, fig.cap="Figure 1. PCoA ordination of HMP 16S profiles based on Bray–Curtis dissimilarity. Points are coloured by body region. Vaginal and gut samples form tight, well-separated clusters, while oral and skin samples overlap."}
+bray <- phyloseq::distance(ps_rel, method = "bray")
+
+ord <- ordinate(ps_rel, method = "PCoA", distance = bray)
+
+plot_ordination(ps_rel, ord, color = "body_region") +
+  geom_point(size = 1.5, alpha = 0.7) +
+  theme_minimal() +
+  labs(
+    title = "PCoA of HMP 16S Profiles (Bray-Curtis)",
+    color = "Body Region"
+  )
+
+
+```
+
+# 6. Hierarchical Clustering
+
+Hierarchical clustering was performed on the Bray–Curtis distance matrix using Ward's D2 linkage. The resulting dendrogram was cut into five clusters, matching the five known body regions, so that cluster assignments could be compared against the true labels.
+
+```{r clustering, echo=FALSE}
+hc <- hclust(bray, method = "ward.D2")
+clusters_5 <- cutree(hc, k = 5)
+meta$cluster_5 <- factor(clusters_5[rownames(meta)])
+```
+
+# 7. Cluster Composition Visualization
+
+Cluster assignments were cross-tabulated against the true body regions to assess how well unsupervised clustering recovers biological signal. The stacked bar chart below shows the proportion of each true region within each cluster.
+
+```{r cluster-visualization, echo=FALSE, fig.cap="Figure 2. Composition of the five hierarchical clusters by true body region (proportions) while oral and skin samples overlap in this 2D projection, despite forming distinct clusters in high-dimensional space"}
+
+meta_df <- as.data.frame(meta)
+meta_df$cluster_5 <- factor(clusters_5[rownames(meta_df)])
+
+# Generate cluster summary
+cluster_summary <- dplyr::count(
+  meta_df,
+  cluster_5,
+  body_region,
+  name = "count"
+)
+
+# FORCE it to be a standard data frame to fix the ggplot error
+cluster_summary <- as.data.frame(cluster_summary)
+
+# Plot cluster composition
+ggplot(
+  data = cluster_summary,
+  aes(
+    x = cluster_5,
+    y = count,
+    fill = body_region
+  )
+) +
+  geom_bar(
+    stat = "identity",
+    position = "fill"
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Composition of 5 Unsupervised Clusters",
+    x = "Cluster",
+    y = "Proportion",
+    fill = "Broad Region"
+  )
+```
+
+# 8. Discussion
+
+The results show clear body-site specificity. The PCoA reveals that vaginal and gut microbiomes form tight, distinct clusters, while oral and skin samples overlap.
+
+The hierarchical clustering yielded a mean purity of 80.7%. The composition plot shows that, due to the high number of oral samples (55.3% of the dataset), the algorithm split the oral region into three separate clusters (2, 4, and 5), each more than 97% oral. Only 2.8% of skin samples were misassigned to an oral cluster, confirming that the oral/skin boundary was well resolved. The class imbalance instead affected the minority regions: essentially all gut (209/210) and vaginal (289/291) samples collapsed together into a single mixed cluster (cluster 1, alongside 35.4% skin), while nasal samples were absorbed into the skin-dominated cluster (cluster 3: 73.1% skin, 26.4% nasal). While 16S data is excellent for separating broad regions, distinguishing fine-scale anatomical subsites — and correcting for severe class imbalance where minority regions are too few to form their own clusters — would require supervised classifiers such as Random Forest or per-region subsampling to balance cluster sizes.
+
